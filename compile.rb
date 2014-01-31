@@ -22,7 +22,7 @@ class Compile
       args.reduce do |a1, a2|
         b.sdiv(a1, a2)
       end
-    end
+    end,
   }
 
   def initialize(mod)
@@ -65,15 +65,48 @@ class Compile
         args = expr[2]
         body = expr[3..-1]
         val = defn(name, args, body)
+      when :cond
+        args = expr[1..-1]
+
+        blk = state[:blk]
+        outblk = blk.parent.basic_blocks.append
+
+        nextblk = blk
+        phis = args.each_slice(2).map do |c, r|
+          thisblk = nextblk
+          nextblk = thisblk.parent.basic_blocks.append
+          resblk = thisblk.parent.basic_blocks.append
+
+          thisblk.build do |b|
+            state, cv = gen(state, c)
+            take = b.icmp(:ne, cv, LLVM::Int(0))
+            b.cond(take, resblk, nextblk)
+          end
+
+          resstate, resval = gen(state.merge({:blk => resblk}), r)
+          resstate[:blk].build do |b|
+            b.br outblk
+          end
+          [resstate[:blk], resval]
+        end
+        nextblk.build do |b|
+          b.br outblk
+        end
+        phis << [nextblk, LLVM::Int(0)]
+
+        outblk.build do |b|
+          val = b.phi(LLVM::Int, Hash[*phis.flatten])
+        end
+        state = state.merge({:blk => outblk})
       else
         final = expr.map{|e| state, v = gen(state, e); v}
         pred = final.first
         args = final[1..-1]
 
         state[:blk].build do |b|
-          begin
+          if pred.respond_to? :call
             val = pred.call(b, args)
-          rescue
+          else
             val = b.call(pred, *args)
           end
         end
@@ -88,15 +121,6 @@ class Compile
     LLVM.init_jit
 
     defn(:main, [], mainexpr)
-    # @m.functions.add("main", [], LLVM::Int) do |f, n|
-    #   b, val = mainexpr.map do |e|
-    #     f.basic_blocks.append.build do |b|
-    #       pp e
-    #       [b, gen(b, @syms, e)]
-    #     end
-    #   end
-    #   b.ret(val)
-    # end
 
     @m.dump
 
