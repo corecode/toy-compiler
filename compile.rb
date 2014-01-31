@@ -27,40 +27,81 @@ class Compile
 
   def initialize(mod)
     @m = LLVM::Module.new(mod)
+    @symbols = BUILTINS.dup
   end
 
-  def gen(b, expr)
+  def defn(name, argnames, body)
+    @m.functions.add(name, [LLVM::Int]*argnames.count, LLVM::Int) do |f, *argvals|
+      @symbols[name] = f
+
+      argsyms = argnames.zip(argvals).map do |n, v|
+        v.name = n.to_s
+        [n, v]
+      end
+      argsyms = Hash[*argsyms.flatten]
+      state = {:sym => argsyms}
+      state[:blk] = f.basic_blocks.append
+
+      v = nil
+      body.each do |bodyexpr|
+        state, v = gen(state, bodyexpr)
+      end
+
+      state[:blk].build do |b|
+        b.ret(v)
+      end
+    end
+  end
+
+  def gen(state, expr)
+    val = nil
     case expr
     when Numeric
-      LLVM::Int(expr)
+      val = LLVM::Int(expr)
     when Array
-      final = expr.map{|e| gen(b, e)}
-      pred = final.first
-      args = final[1..-1]
-      if BUILTINS.include? pred
-        BUILTINS[pred].call(b, args)
+      case expr.first
+      when :defn
+        name = expr[1]
+        args = expr[2]
+        body = expr[3..-1]
+        val = defn(name, args, body)
+      else
+        final = expr.map{|e| state, v = gen(state, e); v}
+        pred = final.first
+        args = final[1..-1]
+
+        state[:blk].build do |b|
+          begin
+            val = pred.call(b, args)
+          rescue
+            val = b.call(pred, *args)
+          end
+        end
       end
     else
-      expr
+      val = state[:sym][expr] || @symbols[expr]
     end
+    [state, val]
   end
 
-  def run(expr)
+  def run(mainexpr)
     LLVM.init_jit
 
-    @m.functions.add("testfn", [], LLVM::Int) do |f, n|
-      f.basic_blocks.append("b").build do |b|
-        b.ret(gen(b, expr))
-        #v = b.add(LLVM::Int(10), LLVM::Int(2))
-        #b.ret(v)
-      end
-    end
+    defn(:main, [], mainexpr)
+    # @m.functions.add("main", [], LLVM::Int) do |f, n|
+    #   b, val = mainexpr.map do |e|
+    #     f.basic_blocks.append.build do |b|
+    #       pp e
+    #       [b, gen(b, @syms, e)]
+    #     end
+    #   end
+    #   b.ret(val)
+    # end
 
-    #@m.verify
     @m.dump
 
     jit = LLVM::JITCompiler.new(@m)
-    jit.run_function(@m.functions["testfn"]).to_i
+    jit.run_function(@m.functions["main"]).to_i
   end
 end
 
@@ -70,6 +111,6 @@ if $0 == __FILE__
   require 'pp'
 
   c = Compile.new("test")
-  p = SexprParser.parse(ARGV.join)
+  p = SexprParser.parse('('+ARGV.join+')')
   pp c.run(p)
 end
