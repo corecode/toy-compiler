@@ -52,6 +52,17 @@ class Compile
     @symbols = {}
   end
 
+  def create_var(state, sym, init_val)
+    mem = nil
+    state[:blk].build do |b|
+      mem = b.alloca(init_val.type)
+      mem.name = "#{sym}"
+      b.store(init_val, mem)
+      state[:sym][sym] = {:type => :loc, :val => mem}
+    end
+    mem
+  end
+
   def defn(name, argnames, body)
     @m.functions.add(name, [LLVM::Int]*argnames.count, LLVM::Int) do |f, *argvals|
       @symbols[name] = {:type => :const, :val => f}
@@ -63,10 +74,7 @@ class Compile
         state[:sym] = sym = {}
         argnames.zip(argvals) do |n, v|
           v.name = "__arg_#{n}"
-          memv = b.alloca(v.type)
-          memv.name = "#{n}"
-          b.store(v, memv)
-          sym[n] = {:type => :loc, :val => memv}
+          create_var(state, n, v)
         end
       end
 
@@ -118,6 +126,27 @@ class Compile
     [state, val]
   end
 
+  def let(state, assignments, body)
+    state = state.dup
+    oldsyms = state[:sym]
+    state[:sym] = syms = oldsyms.dup
+    assignments.each_slice(2) do |sym, expr|
+      if !sym.is_a? Symbol
+        raise RuntimeError, "need symbol in left hand position, got `#{sym}'/#{sym.class} instead"
+      end
+
+      state, val = gen(state, expr)
+      create_var(state, sym, val)
+    end
+
+    val = nil
+    body.each do |be|
+      state, val = gen(state, be)
+    end
+    state[:sym] = oldsyms
+    [state, val]
+  end
+
   def gen(state, expr)
     val = nil
     case expr
@@ -143,6 +172,10 @@ class Compile
         state[:blk].build do |b|
           b.store(val, sym[:val])
         end
+      when :let
+        assignments = expr[1]
+        body = expr[2..-1]
+        state, val = let(state, assignments, body)
       else
         final = expr.map{|e| state, v = gen(state, e); v}
         pred = expr.first
