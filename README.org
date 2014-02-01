@@ -2,7 +2,7 @@
 
 Only integers so far.
 
-Builtins: =+ - * / = not= < > <= >= defn=
+Builtins: ~+ - * / = not= < > <= >= defn~
 
 #+BEGIN_EXAMPLE:
 ruby compile.rb '
@@ -13,7 +13,9 @@ ruby compile.rb '
 
 (factorial 10)'
 #+END_EXAMPLE
-#+BEGIN_RESULT:
+
+should output:
+#+BEGIN_EXAMPLE:
 #### unoptimized:
 ; ModuleID = 'test'
 
@@ -73,4 +75,4 @@ define i32 @factorial(i32 %n) {
 
 #### result:
 3628800
-#+END_RESULT
+#+END_EXAMPLE
