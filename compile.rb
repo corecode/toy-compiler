@@ -133,6 +133,16 @@ class Compile
       when :cond
         args = expr[1..-1]
         state, val = cond(state, args)
+      when :set!
+        sym = expr[1]
+        sym = state[:sym][sym]
+        if not sym || sym[:val] != :loc
+          raise RuntimeError, "target `#{args[1]}' is not mutable"
+        end
+        state, val = gen(state, expr[2])
+        state[:blk].build do |b|
+          b.store(val, sym[:val])
+        end
       else
         final = expr.map{|e| state, v = gen(state, e); v}
         pred = expr.first
@@ -155,10 +165,12 @@ class Compile
         case val[:type]
         when :const
           val = val[:val]
-        else
+        when :loc
           state[:blk].build do |b|
             val = b.load(val[:val])
           end
+        else
+          raise RuntimeError, "unknown value type"
         end
       end
     end
