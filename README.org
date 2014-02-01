@@ -2,7 +2,7 @@
 
 Only integers so far.
 
-Builtins: ~+ - * / = not= < > <= >= defn set! let~
+Builtins: ~+ - * / = not= < > <= >= defn set! let while~
 
 #+BEGIN_EXAMPLE:
 ruby compile.rb '

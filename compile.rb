@@ -78,13 +78,9 @@ class Compile
         end
       end
 
-      v = nil
-      body.each do |bodyexpr|
-        state, v = gen(state, bodyexpr)
-      end
-
+      state, val = gen_body(state, body)
       state[:blk].build do |b|
-        b.ret(v)
+        b.ret(val)
       end
     end
   end
@@ -139,11 +135,37 @@ class Compile
       create_var(state, sym, val)
     end
 
-    val = nil
-    body.each do |be|
-      state, val = gen(state, be)
-    end
+    state, val = gen_body(state, body)
     state[:sym] = oldsyms
+    [state, val]
+  end
+
+  def loop_while(state, test, body)
+    inblk = state[:blk]
+    testblk = inblk.parent.basic_blocks.append
+    bodyblk = inblk.parent.basic_blocks.append
+    outblk = inblk.parent.basic_blocks.append
+
+    inblk.build do |b|
+      b.br(testblk)
+    end
+
+    state = state.merge({:blk => bodyblk})
+    state, bodyval = gen_body(state, body)
+    state[:blk].build do |b|
+      b.br(testblk)
+    end
+
+    val = nil
+    state = state.merge({:blk => testblk})
+    testblk.build do |b|
+      val = b.phi(LLVM::Int, {inblk => LLVM::Int(0), bodyblk => bodyval})
+      state, testval = gen(state, test)
+      cond = b.icmp(:ne, testval, LLVM::Int(0))
+      b.cond(cond, bodyblk, outblk)
+    end
+
+    state = state.merge({:blk => outblk})
     [state, val]
   end
 
@@ -176,6 +198,10 @@ class Compile
         assignments = expr[1]
         body = expr[2..-1]
         state, val = let(state, assignments, body)
+      when :while
+        test = expr[1]
+        body = expr[2..-1]
+        state, val = loop_while(state, test, body)
       else
         final = expr.map{|e| state, v = gen(state, e); v}
         pred = expr.first
@@ -206,6 +232,14 @@ class Compile
           raise RuntimeError, "unknown value type"
         end
       end
+    end
+    [state, val]
+  end
+
+  def gen_body(state, body)
+    val = nil
+    body.each do |be|
+      state, val = gen(state, be)
     end
     [state, val]
   end
