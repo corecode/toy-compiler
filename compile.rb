@@ -163,6 +163,7 @@ class Compile
     pb.opt_level = 3
     pb.size_level = 2
     pb.build(passmgr)
+    passmgr.tailcallelim!
 
     @m.functions.each do |f|
       passmgr.run(f)
