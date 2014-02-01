@@ -56,6 +56,43 @@ class Compile
     end
   end
 
+  def cond(state, args)
+    val = nil
+
+    blk = state[:blk]
+    outblk = blk.parent.basic_blocks.append
+
+    nextblk = blk
+    phis = args.each_slice(2).map do |c, r|
+      thisblk = nextblk
+      nextblk = thisblk.parent.basic_blocks.append
+      resblk = thisblk.parent.basic_blocks.append
+
+      thisblk.build do |b|
+        state, cv = gen(state, c)
+        take = b.icmp(:ne, cv, LLVM::Int(0))
+        b.cond(take, resblk, nextblk)
+      end
+
+      resstate, resval = gen(state.merge({:blk => resblk}), r)
+      resstate[:blk].build do |b|
+        b.br outblk
+      end
+      [resstate[:blk], resval]
+    end
+    nextblk.build do |b|
+      b.br outblk
+    end
+    phis << [nextblk, LLVM::Int(0)]
+
+    outblk.build do |b|
+      val = b.phi(LLVM::Int, Hash[*phis.flatten])
+    end
+    state = state.merge({:blk => outblk})
+
+    [state, val]
+  end
+
   def gen(state, expr)
     val = nil
     case expr
@@ -70,37 +107,7 @@ class Compile
         val = defn(name, args, body)
       when :cond
         args = expr[1..-1]
-
-        blk = state[:blk]
-        outblk = blk.parent.basic_blocks.append
-
-        nextblk = blk
-        phis = args.each_slice(2).map do |c, r|
-          thisblk = nextblk
-          nextblk = thisblk.parent.basic_blocks.append
-          resblk = thisblk.parent.basic_blocks.append
-
-          thisblk.build do |b|
-            state, cv = gen(state, c)
-            take = b.icmp(:ne, cv, LLVM::Int(0))
-            b.cond(take, resblk, nextblk)
-          end
-
-          resstate, resval = gen(state.merge({:blk => resblk}), r)
-          resstate[:blk].build do |b|
-            b.br outblk
-          end
-          [resstate[:blk], resval]
-        end
-        nextblk.build do |b|
-          b.br outblk
-        end
-        phis << [nextblk, LLVM::Int(0)]
-
-        outblk.build do |b|
-          val = b.phi(LLVM::Int, Hash[*phis.flatten])
-        end
-        state = state.merge({:blk => outblk})
+        state, val = cond(state, args)
       else
         final = expr.map{|e| state, v = gen(state, e); v}
         pred = final.first
