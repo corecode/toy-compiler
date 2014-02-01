@@ -5,32 +5,52 @@ require 'llvm/transforms/scalar'
 require 'llvm/transforms/builder'
 
 class Compile
-  BUILTINS = {
-    :+ => proc do |b, args|
-      args.reduce do |a1, a2|
-        b.add(a1, a2)
+  module Builtins
+    Handlers = {}
+
+    {
+      :+ => :add,
+      :- => :sub,
+      :* => :mul,
+      :/ => :sdiv,
+    }.each do |sym, op|
+      Handlers[sym] = proc do |b, args|
+        args.reduce do |a1, a2|
+          b.send(op, a1, a2)
+        end
       end
-    end,
-    :- => proc do |b, args|
-      args.reduce do |a1, a2|
-        b.sub(a1, a2)
+    end
+
+    {
+      '='.to_sym => :eq,
+      :not= => :ne,
+      :< => :slt,
+      :> => :sgt,
+      :<= => :sle,
+      :>= => :sge
+    }.each do |sym, cmp|
+      Handlers[sym] = proc do |b, args|
+        args.each_cons(2).map do |a1, a2|
+          b.icmp(cmp, args[0], args[1])
+        end.reduce do |a1, a2|
+          b.and(a1, a2)
+        end
       end
-    end,
-    :* => proc do |b, args|
-      args.reduce do |a1, a2|
-        b.mul(a1, a2)
-      end
-    end,
-    :/ => proc do |b, args|
-      args.reduce do |a1, a2|
-        b.sdiv(a1, a2)
-      end
-    end,
-  }
+    end
+
+    def self.include?(sym)
+      Handlers.include? sym
+    end
+
+    def self.gen(sym, b, args)
+      pp sym
+      Handlers[sym].call(b, args)
+    end
+  end
 
   def initialize(mod)
     @m = LLVM::Module.new(mod)
-    @symbols = BUILTINS.dup
+    @symbols = {}
   end
 
   def defn(name, argnames, body)
@@ -110,14 +130,17 @@ class Compile
         state, val = cond(state, args)
       else
         final = expr.map{|e| state, v = gen(state, e); v}
-        pred = final.first
+        pred = expr.first
+        fun = final.first
         args = final[1..-1]
 
         state[:blk].build do |b|
-          if pred.respond_to? :call
-            val = pred.call(b, args)
+          if fun.is_a? LLVM::Value
+            val = b.call(fun, *args)
+          elsif Builtins.include? pred
+            val = Builtins.gen(pred, b, args)
           else
-            val = b.call(pred, *args)
+            raise RuntimeError, "invalid indentifier `#{pred}' (#{fun})"
           end
         end
       end
