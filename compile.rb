@@ -54,15 +54,21 @@ class Compile
 
   def defn(name, argnames, body)
     @m.functions.add(name, [LLVM::Int]*argnames.count, LLVM::Int) do |f, *argvals|
-      @symbols[name] = f
+      @symbols[name] = {:type => :const, :val => f}
 
-      argsyms = argnames.zip(argvals).map do |n, v|
-        v.name = n.to_s
-        [n, v]
-      end
-      argsyms = Hash[*argsyms.flatten]
-      state = {:sym => argsyms}
+      state = {}
       state[:blk] = f.basic_blocks.append
+
+      state[:blk].build do |b|
+        state[:sym] = sym = {}
+        argnames.zip(argvals) do |n, v|
+          v.name = "__arg_#{n}"
+          memv = b.alloca(v.type)
+          memv.name = "#{n}"
+          b.store(v, memv)
+          sym[n] = {:type => :loc, :val => memv}
+        end
+      end
 
       v = nil
       body.each do |bodyexpr|
@@ -145,6 +151,16 @@ class Compile
       end
     else
       val = state[:sym][expr] || @symbols[expr]
+      if val
+        case val[:type]
+        when :const
+          val = val[:val]
+        else
+          state[:blk].build do |b|
+            val = b.load(val[:val])
+          end
+        end
+      end
     end
     [state, val]
   end
