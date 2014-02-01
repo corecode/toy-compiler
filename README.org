@@ -1,5 +1,76 @@
 * Try it
 
+Only integers so far.
+
+Builtins: =+ - * / = not= < > <= >= defn=
+
 #+BEGIN_EXAMPLE:
-ruby compile.rb '(defn factorial (n) (cond (> n 1) (* n (factorial (- n 1))) 1 1)) (factorial 10)'
+ruby compile.rb '
+(defn factorial (n)
+  (cond
+    (> n 1) (* n (factorial (- n 1)))
+    1       1))
+
+(factorial 10)'
 #+END_EXAMPLE
+#+BEGIN_RESULT:
+#### unoptimized:
+; ModuleID = 'test'
+
+define i32 @main() {
+  %1 = call i32 @factorial(i32 10)
+  ret i32 %1
+}
+
+define i32 @factorial(i32 %n) {
+  %1 = icmp sgt i32 %n, 1
+  %2 = icmp ne i1 %1, i32 0
+  br i1 %2, label %6, label %5
+
+; <label>:3                                       ; preds = %10, %11, %6
+  %4 = phi i32 [ %9, %6 ], [ 1, %11 ], [ 0, %10 ]
+  ret i32 %4
+
+; <label>:5                                       ; preds = %0
+  br i1 true, label %11, label %10
+
+; <label>:6                                       ; preds = %0
+  %7 = sub i32 %n, 1
+  %8 = call i32 @factorial(i32 %7)
+  %9 = mul i32 %n, %8
+  br label %3
+
+; <label>:10                                      ; preds = %5
+  br label %3
+
+; <label>:11                                      ; preds = %5
+  br label %3
+}
+
+
+#### optimized:
+; ModuleID = 'test'
+
+define i32 @main() {
+  %1 = call i32 @factorial(i32 10)
+  ret i32 %1
+}
+
+define i32 @factorial(i32 %n) {
+  %1 = icmp sgt i32 %n, 1
+  br i1 %1, label %4, label %2
+
+; <label>:2                                       ; preds = %0, %4
+  %3 = phi i32 [ %7, %4 ], [ 1, %0 ]
+  ret i32 %3
+
+; <label>:4                                       ; preds = %0
+  %5 = sub i32 %n, 1
+  %6 = call i32 @factorial(i32 %5)
+  %7 = mul i32 %n, %6
+  br label %2
+}
+
+#### result:
+3628800
+#+END_RESULT

@@ -43,7 +43,6 @@ class Compile
     end
 
     def self.gen(sym, b, args)
-      pp sym
       Handlers[sym].call(b, args)
     end
   end
@@ -155,6 +154,7 @@ class Compile
 
     defn(:main, [], mainexpr)
 
+    $stderr.puts "#### unoptimized:"
     @m.dump
 
     jit = LLVM::JITCompiler.new(@m)
@@ -171,6 +171,7 @@ class Compile
     passmgr.dispose
     pb.dispose
 
+    $stderr.puts "\n\n#### optimized:"
     @m.dump
 
     jit.run_function(@m.functions["main"]).to_i
@@ -183,6 +184,8 @@ if $0 == __FILE__
   require 'pp'
 
   c = Compile.new("test")
-  p = SexprParser.parse('('+ARGV.join+')')
-  pp c.run(p)
+  p = SexprParser.parse('('+ARGV.join.strip+')')
+  res = c.run(p)
+  puts "\n#### result:"
+  pp res
 end
