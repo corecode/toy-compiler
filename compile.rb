@@ -1,5 +1,8 @@
 require 'llvm/core'
 require 'llvm/execution_engine'
+require 'llvm/analysis'
+require 'llvm/transforms/scalar'
+require 'llvm/transforms/builder'
 
 class Compile
   BUILTINS = {
@@ -125,6 +128,21 @@ class Compile
     @m.dump
 
     jit = LLVM::JITCompiler.new(@m)
+    passmgr = LLVM::FunctionPassManager.new(jit, @m)
+    pb = LLVM::PassManagerBuilder.new
+    pb.opt_level = 3
+    pb.size_level = 2
+    pb.build(passmgr)
+
+    @m.functions.each do |f|
+      passmgr.run(f)
+    end
+
+    passmgr.dispose
+    pb.dispose
+
+    @m.dump
+
     jit.run_function(@m.functions["main"]).to_i
   end
 end
