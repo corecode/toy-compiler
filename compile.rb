@@ -75,7 +75,11 @@ class Function
   end
 
   def build(&p)
-    @curblk.build(&p)
+    val = nil
+    @curblk.build do |b|
+      val = yield b
+    end
+    val
   end
 
   def create_var(sym, init_val)
@@ -100,9 +104,11 @@ class Compile
       :* => :mul,
       :/ => :sdiv,
     }.each do |sym, op|
-      h = proc do |b, args|
-        args.reduce do |a1, a2|
-          b.send(op, a1, a2)
+      h = proc do |fn, args|
+        fn.build do |b|
+          args.reduce do |a1, a2|
+            b.send(op, a1, a2)
+          end
         end
       end
       Handlers[sym] = {:type => :const, :val => h}
@@ -116,11 +122,13 @@ class Compile
       :<= => :sle,
       :>= => :sge
     }.each do |sym, cmp|
-      h = proc do |b, args|
-        args.each_cons(2).map do |a1, a2|
-          b.icmp(cmp, args[0], args[1])
-        end.reduce do |a1, a2|
-          b.and(a1, a2)
+      h = proc do |fn, args|
+        fn.build do |b|
+          args.each_cons(2).map do |a1, a2|
+            b.icmp(cmp, args[0], args[1])
+          end.reduce do |a1, a2|
+            b.and(a1, a2)
+          end
         end
       end
       Handlers[sym] = {:type => :const, :val => h}
@@ -268,7 +276,7 @@ class Compile
           if fun.is_a? LLVM::Value
             val = b.call(fun, *args)
           elsif fun.respond_to? :call
-            val = fun.call(b, args)
+            val = fun.call(fn, args)
           else
             raise RuntimeError, "invalid indentifier `#{pred}' (#{fun})"
           end
