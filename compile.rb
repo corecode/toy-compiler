@@ -4,9 +4,95 @@ require 'llvm/analysis'
 require 'llvm/transforms/scalar'
 require 'llvm/transforms/builder'
 
+class Scope
+  def initialize(fun, parentscope)
+    @fun = fun
+    @parent = parentscope
+    @tab = {}
+  end
+
+  def [](sym)
+    puts "#{self}: looking up #{sym}"
+    @tab[sym] || @parent[sym]
+  end
+
+  def []=(sym, val)
+    @tab[sym] = val
+  end
+end
+
+class Function
+  attr_reader :curblk
+
+  def initialize(mod, name, argnames, parentscope)
+    @mod = mod
+    @name = name
+    @argnames = argnames
+    @parentscope = parentscope
+
+    @mod.functions.add(@name, [LLVM::Int]*argnames.count, LLVM::Int) do |f, *argvals|
+      @f = f
+      @parentscope[name] = {:type => :const, :val => @f}
+      @syms = [Scope.new(self, @parentscope)]
+
+      self.new_blk!
+      argnames.zip(argvals) do |n, v|
+        v.name = "__arg_#{n}"
+        self.create_var(n, v)
+      end
+    end
+  end
+
+  def syms
+    @syms.last
+  end
+
+  def push_scope
+    @syms.push Scope.new(self, self.syms)
+    if block_given?
+      begin
+        yield
+      ensure
+        self.pop_scope
+      end
+    end
+  end
+
+  def pop_scope
+    @syms.pop
+  end
+
+  def new_blk!
+    self.set_blk!(self.create_blk)
+  end
+
+  def set_blk!(blk)
+    @curblk = blk
+  end
+
+  def create_blk
+    @f.basic_blocks.append
+  end
+
+  def build(&p)
+    @curblk.build(&p)
+  end
+
+  def create_var(sym, init_val)
+    mem = nil
+    self.build do |b|
+      mem = b.alloca(init_val.type)
+      mem.name = "#{sym}"
+      b.store(init_val, mem)
+      self.syms[sym] = {:type => :loc, :val => mem}
+    end
+    mem
+  end
+end
+
 class Compile
   module Builtins
-    Handlers = {}
+    Handlers = Scope.new(nil, nil)
 
     {
       :+ => :add,
@@ -14,11 +100,12 @@ class Compile
       :* => :mul,
       :/ => :sdiv,
     }.each do |sym, op|
-      Handlers[sym] = proc do |b, args|
+      h = proc do |b, args|
         args.reduce do |a1, a2|
           b.send(op, a1, a2)
         end
       end
+      Handlers[sym] = {:type => :const, :val => h}
     end
 
     {
@@ -29,147 +116,116 @@ class Compile
       :<= => :sle,
       :>= => :sge
     }.each do |sym, cmp|
-      Handlers[sym] = proc do |b, args|
+      h = proc do |b, args|
         args.each_cons(2).map do |a1, a2|
           b.icmp(cmp, args[0], args[1])
         end.reduce do |a1, a2|
           b.and(a1, a2)
         end
       end
-    end
-
-    def self.include?(sym)
-      Handlers.include? sym
-    end
-
-    def self.gen(sym, b, args)
-      Handlers[sym].call(b, args)
+      Handlers[sym] = {:type => :const, :val => h}
     end
   end
 
   def initialize(mod)
     @m = LLVM::Module.new(mod)
-    @symbols = {}
-  end
-
-  def create_var(state, sym, init_val)
-    mem = nil
-    state[:blk].build do |b|
-      mem = b.alloca(init_val.type)
-      mem.name = "#{sym}"
-      b.store(init_val, mem)
-      state[:sym][sym] = {:type => :loc, :val => mem}
-    end
-    mem
+    @globals = Scope.new(nil, Builtins::Handlers)
   end
 
   def defn(name, argnames, body)
-    @m.functions.add(name, [LLVM::Int]*argnames.count, LLVM::Int) do |f, *argvals|
-      @symbols[name] = {:type => :const, :val => f}
+    fn = Function.new(@m, name, argnames, @globals)
 
-      state = {}
-      state[:blk] = f.basic_blocks.append
-
-      state[:blk].build do |b|
-        state[:sym] = sym = {}
-        argnames.zip(argvals) do |n, v|
-          v.name = "__arg_#{n}"
-          create_var(state, n, v)
-        end
-      end
-
-      state, val = gen_body(state, body)
-      state[:blk].build do |b|
-        b.ret(val)
-      end
+    val = gen_body(fn, body)
+    fn.build do |b|
+      b.ret(val)
     end
   end
 
-  def cond(state, args)
+  def cond(fn, args)
     val = nil
 
-    blk = state[:blk]
-    outblk = blk.parent.basic_blocks.append
+    outblk = fn.create_blk
 
-    nextblk = blk
+    nextblk = fn.curblk
     phis = args.each_slice(2).map do |c, r|
-      thisblk = nextblk
-      nextblk = thisblk.parent.basic_blocks.append
-      resblk = thisblk.parent.basic_blocks.append
+      fn.set_blk!(nextblk)
+      nextblk = fn.create_blk
+      resblk = fn.create_blk
 
-      thisblk.build do |b|
-        state, cv = gen(state, c)
+      fn.build do |b|
+        cv = gen(fn, c)
         take = b.icmp(:ne, cv, LLVM::Int(0))
         b.cond(take, resblk, nextblk)
       end
 
-      resstate, resval = gen(state.merge({:blk => resblk}), r)
-      resstate[:blk].build do |b|
+      fn.set_blk!(resblk)
+      resval = gen(fn, r)
+      fn.build do |b|
         b.br outblk
       end
-      [resstate[:blk], resval]
+      resval
     end
-    nextblk.build do |b|
+
+    fn.set_blk!(nextblk)
+    fn.build do |b|
       b.br outblk
     end
     phis << [nextblk, LLVM::Int(0)]
 
-    outblk.build do |b|
+    fn.set_blk!(outblk)
+    fn.build do |b|
       val = b.phi(LLVM::Int, Hash[*phis.flatten])
     end
-    state = state.merge({:blk => outblk})
 
-    [state, val]
+    fn.set_blk!(outblk)
+    val
   end
 
-  def let(state, assignments, body)
-    state = state.dup
-    oldsyms = state[:sym]
-    state[:sym] = syms = oldsyms.dup
-    assignments.each_slice(2) do |sym, expr|
-      if !sym.is_a? Symbol
-        raise RuntimeError, "need symbol in left hand position, got `#{sym}'/#{sym.class} instead"
+  def let(fn, assignments, body)
+    fn.push_scope do
+      assignments.each_slice(2) do |sym, expr|
+        if !sym.is_a? Symbol
+          raise RuntimeError, "need symbol in left hand position, got `#{sym}'/#{sym.class} instead"
+        end
+
+        val = gen(fn, expr)
+        fn.create_var(sym, val)
       end
 
-      state, val = gen(state, expr)
-      create_var(state, sym, val)
+      val = gen_body(fn, body)
+      val
     end
-
-    state, val = gen_body(state, body)
-    state[:sym] = oldsyms
-    [state, val]
   end
 
-  def loop_while(state, test, body)
-    inblk = state[:blk]
-    testblk = inblk.parent.basic_blocks.append
-    bodyblk = inblk.parent.basic_blocks.append
-    outblk = inblk.parent.basic_blocks.append
+  def loop_while(fn, test, body)
+    inblk = fn.curblk
+    testblk = fn.create_blk
+    outblk = fn.create_blk
 
-    inblk.build do |b|
+    fn.build do |b|
       b.br(testblk)
     end
 
-    state = state.merge({:blk => bodyblk})
-    state, bodyval = gen_body(state, body)
-    state[:blk].build do |b|
+    bodyblk = fn.new_blk!
+    bodyval = gen_body(fn, body)
+    fn.build do |b|
       b.br(testblk)
     end
 
+    fn.set_blk!(testblk)
     val = nil
-    state = state.merge({:blk => testblk})
-    testblk.build do |b|
+    fn.build do |b|
       val = b.phi(LLVM::Int, {inblk => LLVM::Int(0), bodyblk => bodyval})
-      state, testval = gen(state, test)
+      testval = gen(fn, test)
       cond = b.icmp(:ne, testval, LLVM::Int(0))
       b.cond(cond, bodyblk, outblk)
     end
 
-    state = state.merge({:blk => outblk})
-    [state, val]
+    fn.set_blk!(outblk)
+    val
   end
 
-  def gen(state, expr)
+  def gen(fn, expr)
     val = nil
     case expr
     when Numeric
@@ -186,46 +242,46 @@ class Compile
         state, val = cond(state, args)
       when :set!
         sym = expr[1]
-        sym = state[:sym][sym]
+        sym = fn.syms[sym]
         if not sym || sym[:val] != :loc
           raise RuntimeError, "target `#{args[1]}' is not mutable"
         end
-        state, val = gen(state, expr[2])
-        state[:blk].build do |b|
+        val = gen(fn, expr[2])
+        fn.build do |b|
           b.store(val, sym[:val])
         end
       when :let
         assignments = expr[1]
         body = expr[2..-1]
-        state, val = let(state, assignments, body)
+        val = let(fn, assignments, body)
       when :while
         test = expr[1]
         body = expr[2..-1]
-        state, val = loop_while(state, test, body)
+        val = loop_while(fn, test, body)
       else
-        final = expr.map{|e| state, v = gen(state, e); v}
+        final = expr.map{|e| v = gen(fn, e); v}
         pred = expr.first
         fun = final.first
         args = final[1..-1]
 
-        state[:blk].build do |b|
+        fn.build do |b|
           if fun.is_a? LLVM::Value
             val = b.call(fun, *args)
-          elsif Builtins.include? pred
-            val = Builtins.gen(pred, b, args)
+          elsif fun.respond_to? :call
+            val = fun.call(b, args)
           else
             raise RuntimeError, "invalid indentifier `#{pred}' (#{fun})"
           end
         end
       end
     else
-      val = state[:sym][expr] || @symbols[expr]
+      val = fn.syms[expr]
       if val
         case val[:type]
         when :const
           val = val[:val]
         when :loc
-          state[:blk].build do |b|
+          fn.build do |b|
             val = b.load(val[:val])
           end
         else
@@ -233,15 +289,15 @@ class Compile
         end
       end
     end
-    [state, val]
+    val
   end
 
-  def gen_body(state, body)
+  def gen_body(fn, body)
     val = nil
     body.each do |be|
-      state, val = gen(state, be)
+      val = gen(fn, be)
     end
-    [state, val]
+    val
   end
 
   def run(mainexpr)
