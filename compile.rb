@@ -4,6 +4,15 @@ require 'llvm/analysis'
 require 'llvm/transforms/scalar'
 require 'llvm/transforms/builder'
 
+
+class Sym
+  attr_accessor :name, :type, :storage, :value
+
+  def initialize(name, type, storage, value)
+    @name, @type, @storage, @value = name, type, storage, value
+  end
+end
+
 class Scope
   def initialize(fun, parentscope)
     @fun = fun
@@ -16,8 +25,8 @@ class Scope
     @tab[sym] || @parent[sym]
   end
 
-  def []=(sym, val)
-    @tab[sym] = val
+  def add(sym)
+    @tab[sym.name] = sym
   end
 end
 
@@ -32,7 +41,7 @@ class Function
 
     @mod.functions.add(@name, [LLVM::Int]*argnames.count, LLVM::Int) do |f, *argvals|
       @f = f
-      @parentscope[name] = {:type => :const, :val => @f}
+      @parentscope.add(Sym.new(name, nil, :const, @f))
       @syms = [Scope.new(name, @parentscope)]
 
       self.new_blk!
@@ -92,7 +101,7 @@ class Function
       mem = b.alloca(init_val.type)
       mem.name = "#{sym}"
       b.store(init_val, mem)
-      self.syms[sym] = {:type => :loc, :val => mem}
+      self.syms.add(Sym.new(sym, nil, :stack, mem))
     end
     mem
   end
@@ -134,17 +143,15 @@ class Function
       val = gen_invocation(expr)
     else
       val = self.syms[expr]
-      if val
-        case val[:type]
-        when :const
-          val = val[:val]
-        when :loc
-          self.build do |b|
-            val = b.load(val[:val])
-          end
-        else
-          raise RuntimeError, "unknown value type"
+      case val.storage
+      when :const, :builtin
+        val = val.value
+      when :stack
+        self.build do |b|
+          val = b.load(val.value)
         end
+      else
+        raise RuntimeError, "unknown value type"
       end
     end
     val
@@ -172,7 +179,7 @@ class Compile
     Handlers = Scope.new("builtins", nil)
 
     def self.add(sym, &blk)
-      Handlers[sym] = {:type => :const, :val => proc(&blk)}
+      Handlers.add(Sym.new(sym, nil, :builtin, proc(&blk)))
     end
 
     Ops_arith.each do |sym, op|
@@ -303,12 +310,12 @@ class Compile
       var_sym, val_sym = args
 
       var = fn.syms[var_sym]
-      if not var || var[:val] != :loc
+      if not var || var.storage != :stack
         raise RuntimeError, "target `#{args[1]}' is not mutable"
       end
       val = fn.gen(val_sym)
       fn.build do |b|
-        b.store(val, var[:val])
+        b.store(val, var.value)
       end
       val
     end
